@@ -1,7 +1,18 @@
 -- busted spec for the Undercover game logic and content.
 -- Run from the plugin dir: busted test_game_spec.lua
-package.path = "./?.lua;" .. package.path
+package.path = "./?.lua;./common/?.lua;" .. package.path
 local Game = dofile("game.lua")
+local SeenHistory = require("seen_history")
+
+-- Plugin settings stand-in (getSetting/saveSetting), kept between "sessions".
+local function fakePlugin()
+    local store = {}
+    return {
+        store = store,
+        getSetting  = function(_self, k, d) if store[k] == nil then return d end return store[k] end,
+        saveSetting = function(_self, k, v) store[k] = v end,
+    }
+end
 
 local PACKS = { "history", "geo", "pop", "food", "kids", "mix" }
 
@@ -284,5 +295,81 @@ describe("persistence and repeats", function()
             seen[k] = true
         end
         g:startRound(c, "x") -- wraps around without error
+        assert.is_nil(g:serialize().used)
+    end)
+
+    local function seenFor(p)
+        return {
+            pairs  = SeenHistory.open(p, "pairs_fr", { id_of = Game.pairId }),
+            places = SeenHistory.open(p, "places_fr", { id_of = Game.placeId }),
+        }
+    end
+
+    it("does not repeat across sessions, until the selection is used up", function()
+        local c = { pairs = {}, places = {} }
+        for i = 1, 12 do c.pairs[i] = { "a" .. i, "b" .. i } end
+        local p = fakePlugin()
+        local got = {}
+        for session = 1, 3 do
+            -- a new game each session (reader closed in between)
+            local g = Game.new{ names = names(4) }
+            for _ = 1, 4 do
+                g:startRound(c, "fr", nil, seenFor(p))
+                local id = math.min(g.round.word_civ, g.round.word_und)
+                assert.is_nil(got[id], "repeated in session " .. session .. ": " .. id)
+                got[id] = true
+            end
+        end
+        -- all 12 played: the next one starts a new cycle without error
+        Game.new{ names = names(4) }:startRound(c, "fr", nil, seenFor(p))
+        assert.equals(1, #p.store.seen_pairs_fr)
+    end)
+
+    it("keeps other packs' history when the selection is used up", function()
+        local p = fakePlugin()
+        local small = { pairs = { { "x1", "y1" }, { "x2", "y2" } }, places = {} }
+        local other = { "o1", "o2" }
+        seenFor(p).pairs:mark({ other })
+        local g = Game.new{ names = names(4) }
+        for _ = 1, 3 do g:startRound(small, "fr", nil, seenFor(p)) end
+        assert.is_true(SeenHistory.open(p, "pairs_fr", { id_of = Game.pairId }):has(Game.pairId(other)))
+    end)
+
+    it("migrates the 1.0.x used sets of a saved game once", function()
+        local fr = content("fr")
+        -- 1.0.x state: indices into the merged "food,kids" pairs and all-pack places
+        local food = dofile("content/fr/pairs_food.lua")
+        local kids = dofile("content/fr/pairs_kids.lua")
+        local merged = {}
+        for _, e in ipairs(food) do merged[#merged + 1] = e end
+        for _, e in ipairs(kids) do merged[#merged + 1] = e end
+        local state = {
+            players = { { name = "A", score = 0 }, { name = "B", score = 0 }, { name = "C", score = 0 } },
+            used = { ["fr:food,kids:pairs"] = { 1, 2, #food + 1 },
+                     ["fr:history,geo,pop,food,kids,mix:places"] = { 3 } },
+        }
+        local p = fakePlugin()
+        local hist = seenFor(p)
+        local function listFor(kind, packs, lang)
+            assert.equals("fr", lang)
+            if kind == "pairs" then
+                assert.same({ "food", "kids" }, packs)
+                return merged
+            end
+            return fr.places
+        end
+        assert.is_true(Game.migrateLegacyUsed(state, listFor, function(kind) return hist[kind] end))
+        assert.is_true(hist.pairs:has(Game.pairId(food[1])))
+        assert.is_true(hist.pairs:has(Game.pairId(food[2])))
+        assert.is_true(hist.pairs:has(Game.pairId(kids[1])))
+        assert.is_false(hist.pairs:has(Game.pairId(food[3])))
+        assert.is_true(hist.places:has(Game.placeId(fr.places[3])))
+        assert.equals(3, #p.store.seen_pairs_fr)
+        -- persisted: a new session sees them
+        assert.is_true(seenFor(p).pairs:has(Game.pairId(kids[1])))
+        -- the loaded game no longer carries them, so nothing migrates twice
+        local g = Game.load(state)
+        assert.is_false(Game.migrateLegacyUsed(g:serialize(), listFor, function() error("again") end))
+        assert.is_false(Game.migrateLegacyUsed(nil, listFor, function() error("nil") end))
     end)
 end)

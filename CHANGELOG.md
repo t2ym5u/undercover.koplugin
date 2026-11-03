@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.1.0] - 2026-11-03
+
+### Changed
+- No repeats across sessions: a word pair or a place is not dealt again —
+  even after closing the game or starting a new one — until every one of the
+  selected packs has been played; then only those packs start over. The
+  pairs and places already played in the saved game are carried over.
+
 ## [1.0.2] - 2026-11-02
 
 ### Changed

@@ -17,6 +17,8 @@
 --   over       -- a side has won, scores are added
 -- ---------------------------------------------------------------------------
 
+local SeenHistory = require("seen_history")
+
 local Game = {}
 Game.__index = Game
 
@@ -113,7 +115,7 @@ function Game.new(opts)
         undercovers = opts.undercovers or "auto",
         mr_white    = opts.mr_white and true or false,
         players     = {},
-        used        = {},   -- content index -> true, so a session doesn't repeat
+        seen        = {},   -- kind key -> in-memory SeenHistory, when none is given
         rounds      = 0,
         round       = nil,
     }, Game)
@@ -154,28 +156,25 @@ local function shuffle(t, rng)
     return t
 end
 
--- Pick an unused entry index of `list`, forgetting the used set once every
--- entry has been played.
-function Game:_pickIndex(list, key, rng)
-    self.used[key] = self.used[key] or {}
-    local used = self.used[key]
-    local free = {}
-    for i = 1, #list do
-        if not used[i] then free[#free + 1] = i end
+-- Content ids for the no-repeat history: the words of a pair, the place of
+-- a spy entry. Text, not indices, so a pack update doesn't scramble them.
+function Game.pairId(pair) return tostring(pair[1]) .. "|" .. tostring(pair[2]) end
+function Game.placeId(entry) return tostring(entry[1]) end
+
+-- An in-memory history, for a game built without one (specs, fallback).
+function Game:_memSeen(key, id_of)
+    if not self.seen[key] then
+        self.seen[key] = SeenHistory.open(nil, key, { id_of = id_of })
     end
-    if #free == 0 then
-        self.used[key] = {}
-        used = self.used[key]
-        for i = 1, #list do free[i] = i end
-    end
-    local idx = free[rng(#free)]
-    used[idx] = true
-    return idx
+    return self.seen[key]
 end
 
 -- content: { pairs = { {a, b}, ... }, places = { {place, role, ...}, ... } }
--- key: a string identifying the content (language), for the no-repeat set.
-function Game:startRound(content, key, rng)
+-- seen: { pairs = SeenHistory, places = SeenHistory } remembering what was
+-- dealt across sessions (ids from Game.pairId / Game.placeId): an entry is
+-- not dealt again until the whole pool (the selected packs) has been played.
+-- Without it, an in-memory history keyed by `key` (the language) is used.
+function Game:startRound(content, key, rng, seen)
     rng = rng or math.random
     local n = #self.players
     assert(n >= Game.MIN_PLAYERS, "not enough players")
@@ -191,8 +190,8 @@ function Game:startRound(content, key, rng)
     local slots = {}
     if self.mode == "spy" then
         local list = content.places
-        local idx = self:_pickIndex(list, (key or "") .. ":places", rng)
-        local entry = list[idx]
+        local h = seen and seen.places or self:_memSeen((key or "") .. ":places", Game.placeId)
+        local entry = h:pick(list, rng)
         r.place = entry[1]
         slots[1] = "spy"
         for i = 2, n do slots[i] = "agent" end
@@ -210,8 +209,8 @@ function Game:startRound(content, key, rng)
         end
     else
         local list = content.pairs
-        local idx = self:_pickIndex(list, (key or "") .. ":pairs", rng)
-        local pair = list[idx]
+        local h = seen and seen.pairs or self:_memSeen((key or "") .. ":pairs", Game.pairId)
+        local pair = h:pick(list, rng)
         if rng(2) == 1 then
             r.word_civ, r.word_und = pair[1], pair[2]
         else
@@ -455,19 +454,14 @@ local function copy(v)
     return t
 end
 
--- Keys of r.roles etc. are player indices; LuaSettings keeps numeric keys,
--- but `used` sets are stored as lists to stay compact.
+-- Keys of r.roles etc. are player indices; LuaSettings keeps numeric keys.
+-- What was dealt is not part of the game: it lives in the plugin settings
+-- (SeenHistory), see the screen. Up to 1.0.x it was saved here as `used`
+-- (content key -> list of indices); Game.legacyUsed() reads it once.
 function Game:serialize()
-    local used = {}
-    for key, set in pairs(self.used) do
-        local l = {}
-        for i in pairs(set) do l[#l + 1] = i end
-        table.sort(l)
-        used[key] = l
-    end
     return {
         mode = self.mode, undercovers = self.undercovers, mr_white = self.mr_white,
-        players = copy(self.players), used = used, rounds = self.rounds,
+        players = copy(self.players), rounds = self.rounds,
         round = copy(self.round),
     }
 end
@@ -477,10 +471,6 @@ function Game.load(data)
     local self = Game.new{ mode = data.mode, undercovers = data.undercovers, mr_white = data.mr_white }
     for i, p in ipairs(data.players) do
         self.players[i] = { name = tostring(p.name or "?"), score = tonumber(p.score) or 0 }
-    end
-    for key, l in pairs(data.used or {}) do
-        self.used[key] = {}
-        for _, i in ipairs(l) do self.used[key][i] = true end
     end
     self.rounds = tonumber(data.rounds) or 0
     self.round  = copy(data.round)
@@ -494,6 +484,48 @@ function Game.load(data)
         end
     end
     return self
+end
+
+-- The 1.0.x no-repeat sets of a saved state, as a list of
+-- { lang, packs = { pack, ... }, kind = "pairs" | "places", indices = {...} }
+-- (keys were "<lang>:<pack>,<pack>...:<kind>", indices into the selected
+-- packs merged in PACKS order). nil when there is nothing to migrate.
+function Game.legacyUsed(data)
+    if type(data) ~= "table" or type(data.used) ~= "table" then return nil end
+    local out = {}
+    for key, l in pairs(data.used) do
+        local lang, sig, kind = tostring(key):match("^([^:]*):([^:]*):(%a+)$")
+        if lang and (kind == "pairs" or kind == "places") and type(l) == "table" then
+            local packs = {}
+            for p in sig:gmatch("[^,]+") do packs[#packs + 1] = p end
+            local idx = {}
+            for _, i in ipairs(l) do
+                if tonumber(i) then idx[#idx + 1] = tonumber(i) end
+            end
+            out[#out + 1] = { lang = lang, packs = packs, kind = kind, indices = idx }
+        end
+    end
+    return out
+end
+
+-- Carries the 1.0.x sets of `data` into the histories: listFor(kind, packs,
+-- lang) gives the merged pack list the indices point into, seenFor(kind,
+-- lang) the SeenHistory to mark. Returns true when `data` had such sets
+-- (the caller then drops them and saves).
+function Game.migrateLegacyUsed(data, listFor, seenFor)
+    local legacy = Game.legacyUsed(data)
+    if not legacy then return false end
+    for _, l in ipairs(legacy) do
+        if l.lang == "fr" or l.lang == "en" then
+            local list = listFor(l.kind, l.packs, l.lang)
+            local items = {}
+            for _, i in ipairs(l.indices) do
+                if list[i] then items[#items + 1] = list[i] end
+            end
+            if #items > 0 then seenFor(l.kind, l.lang):mark(items) end
+        end
+    end
+    return true
 end
 
 return Game

@@ -33,6 +33,7 @@ local T               = require("ffi/util").template
 
 local MenuHelper  = require("menu_helper")
 local ScreenBase  = require("screen_base")
+local SeenHistory = require("seen_history")
 local Game        = lrequire("game")
 local PlayersMenu = lrequire("players")
 
@@ -153,7 +154,12 @@ function UndercoverScreen:init()
     self.time_left   = self.timer_secs
     self.timer_running = false
 
-    self.game = Game.load(p:loadState())
+    local state = p:loadState()
+    if self:_migrateUsed(state) then
+        state.used = nil
+        p:saveState(state)
+    end
+    self.game = Game.load(state)
     if not self.game or #self.game.players < Game.MIN_PLAYERS then
         self.game = Game.new{
             names       = self:_savedNames(),
@@ -205,8 +211,8 @@ local PACK_LABELS = {
 
 -- One pack file, loaded on first use and kept for the session (a pack is a
 -- few kilobytes; only the packs actually played get loaded).
-function UndercoverScreen:_pack(kind, pack)
-    local key = self.lang .. "/" .. kind .. "_" .. pack
+function UndercoverScreen:_pack(kind, pack, lang)
+    local key = (lang or self.lang) .. "/" .. kind .. "_" .. pack
     if not self.content[key] then
         local chunk = loadfile(_dir .. "content/" .. key .. ".lua")
         local ok, t = pcall(chunk or error)
@@ -219,18 +225,55 @@ function UndercoverScreen:_isPackOn(pack)
     return self.packs == nil or self.packs[pack] == true
 end
 
--- The selected packs merged, for the current mode's kind. The key names the
--- selection, so the no-repeat memory starts over when it changes.
+-- The selected packs merged, for the current mode's kind, and the language
+-- (the in-memory fallback key of Game:startRound()).
 function UndercoverScreen:_content()
     local kind = self.game.mode == "spy" and "places" or "pairs"
-    local list, sig = {}, {}
+    return { [kind] = self:_merged(kind, nil, self.lang) }, self.lang
+end
+
+-- `packs`: list of pack ids, nil = the current selection.
+function UndercoverScreen:_merged(kind, packs, lang)
+    local on = {}
+    if packs then
+        for _i, pk in ipairs(packs) do on[pk] = true end
+    end
+    local list = {}
     for _i, pack in ipairs(PACKS) do
-        if self:_isPackOn(pack) then
-            sig[#sig + 1] = pack
-            for _j, e in ipairs(self:_pack(kind, pack)) do list[#list + 1] = e end
+        if (packs and on[pack]) or (not packs and self:_isPackOn(pack)) then
+            for _j, e in ipairs(self:_pack(kind, pack, lang)) do list[#list + 1] = e end
         end
     end
-    return { [kind] = list }, self.lang .. ":" .. table.concat(sig, ",")
+    return list
+end
+
+-- What was dealt, remembered across sessions in the plugin settings, one
+-- history per kind and language ("seen_pairs_fr", "seen_places_en"...).
+-- A pair or place is not dealt again until every one of the selected packs
+-- has been played; then only that selection starts over, the rest of the
+-- history (other packs) is kept.
+local SEEN_MAX = { pairs = 2000, places = 500 }
+local SEEN_ID  = { pairs = Game.pairId, places = Game.placeId }
+
+function UndercoverScreen:_seen(kind, lang)
+    lang = lang or self.lang
+    self.seen_hist = self.seen_hist or {}
+    local key = kind .. "_" .. lang
+    if not self.seen_hist[key] then
+        self.seen_hist[key] = SeenHistory.open(self.plugin, key,
+            { max = SEEN_MAX[kind], id_of = SEEN_ID[kind] })
+    end
+    return self.seen_hist[key]
+end
+
+-- 1.0.x kept the dealt entries in the saved game (`used`, indices into the
+-- packs selected then): carry them into the SeenHistory once, so nobody gets
+-- the words of last night again. Returns true when the state had some (the
+-- caller then saves it without them).
+function UndercoverScreen:_migrateUsed(state)
+    return Game.migrateLegacyUsed(state,
+        function(kind, packs, lang) return self:_merged(kind, packs, lang) end,
+        function(kind, lang) return self:_seen(kind, lang) end)
 end
 
 function UndercoverScreen:_loadPackSelection()
@@ -292,7 +335,7 @@ function UndercoverScreen:onStartRound()
         return
     end
     self:_stopCountdown()
-    self.game:startRound(c, key)
+    self.game:startRound(c, key, nil, { pairs = self:_seen("pairs"), places = self:_seen("places") })
     self.showing_secret = false
     self.voting = false
     self.time_left = self.timer_secs
