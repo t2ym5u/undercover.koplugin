@@ -28,6 +28,7 @@ Everyone gets a secret, privately, one after the other: a hand-over screen asks 
 ## Features
 
 - Player names typed once and remembered; scores across rounds.
+- No repeats: a pair or place already played (in any session) only comes back once all the selected packs have been played.
 - Optional discussion timer (1–5 min); only the digits refresh, once a second.
 - Content language (FR/EN) independent of the interface language.
 - Six themed packs, picked in the menu (multi-select, with counts): History & legends, Geography & monuments, Pop culture, Food, Kids, Mix & laughs.
