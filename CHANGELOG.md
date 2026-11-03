@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.2] - 2026-11-02
+
+### Changed
+- Picks up game-common 1.10.0: the shared Tools → Games menu also lists
+  the games' new "· multiplayer" entries under Party & quiz.
+
 ## [1.0.1] - 2026-11-02
 
 ### Changed
