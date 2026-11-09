@@ -145,7 +145,7 @@ local UndercoverScreen = ScreenBase:extend{}
 
 function UndercoverScreen:init()
     local p = self.plugin
-    self.lang        = p:getSetting("lang", _.lang() == "fr" and "fr" or "en")
+    self.lang        = p:getLang({ "fr", "en" })
     self.timer_secs  = p:getSetting("timer", 0)
     self.content     = {}
     self.packs       = self:_loadPackSelection()
@@ -491,7 +491,7 @@ function UndercoverScreen:openLangMenu()
         parent     = self,
         on_select  = function(lang)
             self.lang = lang
-            self.plugin:saveSetting("lang", lang)
+            self.plugin:setLang(lang)
             self:_refresh()
         end,
     }
