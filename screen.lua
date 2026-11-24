@@ -350,6 +350,7 @@ end
 
 -- New game: scores back to zero, back to the player list.
 function UndercoverScreen:onNewGame()
+    self:cancelScheduled()
     self:_stopCountdown()
     self.game:resetScores()
     self.showing_secret = false
@@ -449,7 +450,7 @@ function UndercoverScreen:onToggleTimer()
         self.timer_running = true
         self._tick_gen = (self._tick_gen or 0) + 1
         local gen = self._tick_gen
-        UIManager:scheduleIn(1, function() self:_onTick(gen) end)
+        self:schedule(1, function() self:_onTick(gen) end)
     end
     self:_refresh()
 end
@@ -475,7 +476,7 @@ function UndercoverScreen:_onTick(gen)
         self:_refresh()
         UIManager:show(InfoMessage:new{ text = _("Time's up — vote!"), timeout = 3 })
     else
-        UIManager:scheduleIn(1, function() self:_onTick(gen) end)
+        self:schedule(1, function() self:_onTick(gen) end)
     end
 end
 
